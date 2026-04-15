@@ -5,19 +5,9 @@ mod database;
 mod graph;
 mod preset;
 
-mod largest_organism_viz;
-mod statistics;
-
-use grid::{CellType, Grid};
-use largest_organism_viz::LargestOrganismViz;
+use graph::PopulationGraph;
+use grid::Grid;
 use preset::Preset;
-use statistics::{
-    AverageSizeGraph,
-    CellTypeDistribution,
-    CellTypeGraph,
-    PopulationGraph, // This replaces the old one from graph.rs
-    SimulationStats,
-};
 
 use iced::time;
 use iced::widget::{button, checkbox, column, container, pick_list, row, slider, text};
@@ -47,11 +37,6 @@ pub struct LifeSim {
     version: usize,
     db: database::WorldDatabase,
     population_graph: PopulationGraph,
-
-    tick_count: usize,
-    avg_size_graph: AverageSizeGraph,
-    cell_type_graph: CellTypeGraph,
-    largest_organism_viz: LargestOrganismViz,
     saves: Vec<database::SaveInfo>,
     selected_save: Option<database::SaveInfo>,
 }
@@ -89,12 +74,7 @@ impl LifeSim {
             next_speed: None,
             version: 0,
             db,
-
-            tick_count: 0,
             population_graph: PopulationGraph::new(),
-            avg_size_graph: AverageSizeGraph::new(),
-            cell_type_graph: CellTypeGraph::new(),
-            largest_organism_viz: LargestOrganismViz::new(),
             saves,
             selected_save,
         }
@@ -120,48 +100,6 @@ impl LifeSim {
 
                     self.queued_ticks = 0;
 
-                    let organisms = &self.grid.state.life.organisms;
-                    let cells = &self.grid.state.life.cells;
-
-                    // Population
-                    let organism_count = organisms.len();
-                    self.population_graph.update(organism_count);
-
-                    // Average organism size
-                    let avg_size = if organism_count > 0 {
-                        organisms.iter().map(|o| o.cells.len()).sum::<usize>() as f32
-                            / organism_count as f32
-                    } else {
-                        0.0
-                    };
-                    self.avg_size_graph.update(avg_size);
-
-                    // Cell type distribution
-                    let mut distribution = CellTypeDistribution::default();
-                    for organism in organisms {
-                        for cell in &organism.cells {
-                            match cell.cell_type {
-                                CellType::Alive => distribution.alive += 1,
-                                CellType::Grower => distribution.grower += 1,
-                                CellType::Mover => distribution.mover += 1,
-                                CellType::Food => distribution.food += 1,
-                                _ => {}
-                            }
-                        }
-                    }
-                    // Also count free cells
-                    for cell in cells {
-                        match cell.cell_type {
-                            CellType::Food => distribution.food += 1,
-                            _ => {}
-                        }
-                    }
-                    self.cell_type_graph.update(distribution);
-
-                    // Largest organism
-                    let largest = organisms.iter().max_by_key(|o| o.cells.len()).cloned();
-                    self.largest_organism_viz.update(largest);
-
                     let version = self.version;
 
                     return Task::perform(task, move |message| Message::Grid(message, version));
@@ -175,10 +113,6 @@ impl LifeSim {
             }
             Message::Clear => {
                 self.grid.clear();
-                self.population_graph.clear();
-                self.avg_size_graph.clear();
-                self.cell_type_graph.clear();
-                self.largest_organism_viz.update(None);
                 self.version += 1;
             }
             Message::SpeedChanged(speed) => {
@@ -282,28 +216,12 @@ impl LifeSim {
             self.selected_save.clone(),
         );
 
-        let graphs_row = row![
-            self.population_graph.view().map(|_| Message::Ignore),
-            self.avg_size_graph.view().map(|_| Message::Ignore),
-            self.cell_type_graph.view().map(|_| Message::Ignore),
-        ]
-        .spacing(10)
-        .padding(10);
-
-        // NEW: Create bottom row with controls and largest organism viz
-        let bottom_row = row![
-            controls,
-            self.largest_organism_viz.view().map(|_| Message::Ignore),
-        ]
-        .spacing(10)
-        .padding(10);
-
         let content = column![
             self.grid
                 .view()
                 .map(move |message| Message::Grid(message, version)),
-            graphs_row, // NEW
-            bottom_row, // MODIFIED
+            self.population_graph.view().map(|_| Message::Ignore),
+            controls,
         ]
         .height(Fill);
 
@@ -1276,84 +1194,149 @@ pub mod grid {
         }
 
         pub fn move_organisms(&mut self) {
-            // move_organisms function
-            // Uses an occupied set (position-only) to track claimed cells this tick.
-            // Seeded with only non-organism, non-food cells so no organism starts
-            // pre-blocked by itself or any other organism's starting position.
-            // As each organism is resolved, its final positions are inserted into
-            // occupied so later organisms cannot claim the same cell this tick.
+            // move_organims function
+            // simulates the random movement of organisms on the grid
+            // for each organism on the grid it randomly selects a direction
+            // it then iterates over the cells in the organism and finds their new potential poision
+            // if the cells in the potential position are occupied can_move is set to false
+            // if can_move is true move organism cells to new postions, and remove old cells from the grid
+            // if can_move is false maintain the organisms position and update the grid again.
 
             use rand::Rng;
+            let mut new_organisms = Vec::new();
+            let mut new_cells = self.cells.clone(); // Keep all existing cells
+
             let mut rng = rand::thread_rng();
 
-            // Collect every position currently belonging to an organism.
-            let organism_positions: HashSet<(isize, isize)> = self
-                .organisms
-                .iter()
-                .flat_map(|o| o.cells.iter().map(|c| (c.i, c.j)))
-                .collect();
-
-            // Seed occupied with non-organism, non-food positions only.
-            // Food is excluded so organisms are allowed to move into food cells.
-            let mut occupied: HashSet<(isize, isize)> = self
-                .cells
-                .iter()
-                .filter(|c| {
-                    c.cell_type != CellType::Food && !organism_positions.contains(&(c.i, c.j))
-                })
-                .map(|c| (c.i, c.j))
-                .collect();
-
-            // Start new_cells from all non-organism cells (food etc.) unchanged.
-            let mut new_cells: Vec<Cell> = self
-                .cells
-                .iter()
-                .filter(|c| !organism_positions.contains(&(c.i, c.j)))
-                .cloned()
-                .collect();
-
-            let mut new_organisms = Vec::new();
-
             for organism in &self.organisms {
+                /*
+                if !organism.able_to_move {
+                    continue;
+                }
+                */
+
+                let mut new_organism_cells = Vec::new();
+                let mut can_move = true;
+
+                // Random movement directions
                 let (dx, dy) = match rng.gen_range(0..4) {
-                    0 => (1, 0),  // right
-                    1 => (-1, 0), // left
-                    2 => (0, 1),  // down
-                    _ => (0, -1), // up
+                    0 => (1, 0),  // Move right
+                    1 => (-1, 0), // Move left
+                    2 => (0, 1),  // Move down
+                    _ => (0, -1), // Move up
                 };
 
-                // Movement is valid only if every target position is free in occupied.
-                let can_move = organism
-                    .cells
-                    .iter()
-                    .all(|c| !occupied.contains(&(c.i + dy, c.j + dx)));
+                // Check if cells can move in the chosen direction
+                for cell in &organism.cells {
+                    let potential_new_position = Cell {
+                        i: cell.i + dy,
+                        j: cell.j + dx,
+                        cell_type: cell.cell_type,
+                    };
 
-                let new_organism_cells: Vec<Cell> = organism
-                    .cells
-                    .iter()
-                    .map(|c| Cell {
-                        i: if can_move { c.i + dy } else { c.i },
-                        j: if can_move { c.j + dx } else { c.j },
-                        cell_type: c.cell_type,
-                    })
-                    .collect();
+                    // iterate over each cell and make sure that it is not occupied (unless it's part of itself)  NOT WELL OPTIMIZED
 
-                // Register final positions so subsequent organisms cannot claim them.
-                for cell in &new_organism_cells {
-                    occupied.insert((cell.i, cell.j));
-                    new_cells.push(*cell);
+                    if self.cells.iter().any(|existing_cell| {
+                        existing_cell.i == potential_new_position.i
+                            && existing_cell.j == potential_new_position.j
+                            && existing_cell.cell_type != CellType::Food
+                            && !organism.contains(existing_cell)
+                    }) {
+                        can_move = false;
+                        break;
+                    }
                 }
 
+                if can_move {
+                    // we have found a direction the organism can move in
+
+                    // remove old organism cells from new_cells
+                    for cell in &organism.cells {
+                        new_cells.retain(|c| c != cell);
+                    }
+
+                    // move the organism cells to new positions
+                    for cell in &organism.cells {
+                        let new_cell = Cell {
+                            i: cell.i + dy,
+                            j: cell.j + dx,
+                            cell_type: cell.cell_type,
+                        };
+                        new_organism_cells.push(new_cell);
+                        new_cells.push(new_cell);
+                    }
+                } else {
+                    // if movement is not possible keep the organism in place
+                    for cell in &organism.cells {
+                        new_organism_cells.push(*cell);
+                        if !new_cells.contains(cell) {
+                            new_cells.push(*cell);
+                        }
+                    }
+                }
                 new_organisms.push(Organism {
                     id: None,
                     cells: new_organism_cells,
-                    energy: organism.energy.saturating_sub(1),
+                    energy: organism.energy - 1,
                     able_to_move: organism.able_to_move,
                 });
             }
 
+            // update the state
             self.organisms = new_organisms;
             self.cells = new_cells;
+
+            /*
+            let mut occupied = self.build_occupied();
+            let mut new_cells = Vec::new();
+            let mut new_organisms = Vec::new();
+
+            let mut rng = rand::thread_rng();
+
+            for organism in &self.organisms {
+                let (dx, dy) = match rng.gen_range(0..4) {
+                    0 => (1, 0),
+                    1 => (-1, 0),
+                    2 => (0, 1),
+                    _ => (0, -1),
+                };
+
+                let mut can_move = true;
+
+                let mut new_cells_for_org = Vec::new();
+
+                for cell in &organism.cells {
+                    let new_cell = Cell {
+                        i: cell.i + dy,
+                        j: cell.j + dx,
+                        cell_type: cell.cell_type, // ✅ preserve type
+                    };
+
+                    if occupied.contains(&(new_cell.i, new_cell.j))
+                        && !organism.cells.contains(cell)
+                    {
+                        can_move = false;
+                        break;
+                    }
+
+                    new_cells_for_org.push(new_cell);
+                }
+
+                if can_move {
+                    for cell in &new_cells_for_org {
+                        occupied.insert((cell.i, cell.j));
+                        new_cells.push(*cell);
+                    }
+
+                    new_organisms.push(Organism {
+                        id: None,
+                        cells: new_cells_for_org,
+                        energy: organism.energy - 1,
+                        able_to_move: organism.able_to_move,
+                    });
+                }
+            }
+            */
         }
         fn tick(&mut self) {
             // Function used to sequentially call necessary functions on each simulation tick
@@ -1386,19 +1369,16 @@ pub mod grid {
             // reproduce_organism function
             // iterates through each organism on the grid
             // if the organism does not have enough energy to reproduce it skips that one
-            // it also has a CHANCE_TO_SKIP_REPRODUCTION percent chance to skip reproduction
-            // calculates the width and height of each organism and calculates potential
-            // new positions for the entire organism, making sure there is enough space.
-            // Can possibly mutate an extra cell, then reduces the original organism's energy.
-            //
-            // occupied is seeded from every position in the world and updated after each
-            // successful reproduction, so two organisms cannot reproduce into the same
-            // cell within the same tick. All conflict checks are position-only so that
-            // cell_type mismatches cannot cause false negatives.
+            // it also has a CHANCE_TO_SKIP_REPRODUCTION  percent chance to skip reproduction on top of that
+            // calculates the width and height of each organism
+            // and calculates potential new positions for the entire organism
+            // making sure there is enough space for the organism.
+            // can possibly mutate an extra cell
+            // and afterwards reduces the original organism's energy before updating the grid.
 
-            let mut occupied: HashSet<(isize, isize)> =
-                self.cells.iter().map(|c| (c.i, c.j)).collect();
+            // collect new organisms in a temporary vector.
 
+            let mut occupied = self.build_occupied();
             let mut new_organisms = Vec::new();
 
             for organism in &mut self.organisms {
@@ -1416,7 +1396,7 @@ pub mod grid {
                 let height = max_i - min_i + 1;
 
                 // Define candidate offsets for reproduction
-                // right, left, down, up. The offset is the parent's dimension plus a gap.
+                // right, left, down, up. The offset is parents dimension plus a gap
                 let candidates = [
                     (width + Self::REPRODUCTION_GAP, 0),     // right
                     (-(width + Self::REPRODUCTION_GAP), 0),  // left
@@ -1424,9 +1404,10 @@ pub mod grid {
                     (0, -(height + Self::REPRODUCTION_GAP)), // up
                 ];
 
+                // Try each candidate direction until one works.
                 let mut reproduced = false;
                 for &(dx, dy) in &candidates {
-                    // Generate offspring cells by offsetting each parent cell.
+                    // Generate the offspring cells by offsetting each parent's cell.
                     let mut offspring_cells: Vec<Cell> = organism
                         .cells
                         .iter()
@@ -1434,8 +1415,10 @@ pub mod grid {
                             let mut new_cell = Cell {
                                 i: cell.i + dy,
                                 j: cell.j + dx,
-                                cell_type: cell.cell_type,
+                                cell_type: cell.cell_type, // Default to the same type.
                             };
+
+                            // Apply mutation with a set probability.
                             if Life::chance(Self::MUTATION_RATE) {
                                 if let Some(mutated_type) = Cell::random_type() {
                                     new_cell.cell_type = mutated_type;
@@ -1445,54 +1428,78 @@ pub mod grid {
                         })
                         .collect();
 
-                    // Position-only conflict check against occupied.
-                    if offspring_cells
+                    // Check if any of these new cells already exist in the world's grid.
+
+                    /*
+
+                        if offspring_cells
+                            .iter()
+                            .any(|c| occupied.contains(&(c.i, c.j)))
+                        {
+                            continue;
+                        }
+
+                        for c in &offspring_cells {
+                            occupied.insert((c.i, c.j));
+                            self.cells.push(*c);
+                        }
+                    */
+
+                    let conflict = offspring_cells
                         .iter()
-                        .any(|c| occupied.contains(&(c.i, c.j)))
-                    {
-                        continue;
+                        .any(|offspring_cell| self.cells.contains(offspring_cell));
+                    if conflict {
+                        continue; // Try next candidate direction.
                     }
 
-                    // Introduce a random extra mutated cell adjacent to the offspring.
-                    if Life::chance(Self::MUTATION_RATE) && !offspring_cells.is_empty() {
-                        let random_index = rand::thread_rng().gen_range(0..offspring_cells.len());
-                        let base_cell = offspring_cells[random_index];
-                        let mutation_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)];
-                        let offset_index = rand::thread_rng().gen_range(0..mutation_offsets.len());
-                        let (mx, my) = mutation_offsets[offset_index];
-                        let extra_cell = Cell {
-                            i: base_cell.i + my,
-                            j: base_cell.j + mx,
-                            cell_type: Cell::random_type().unwrap_or(base_cell.cell_type),
-                        };
-                        // Only add the extra cell if the position is free.
-                        if !occupied.contains(&(extra_cell.i, extra_cell.j))
-                            && !offspring_cells
-                                .iter()
-                                .any(|c| c.i == extra_cell.i && c.j == extra_cell.j)
-                        {
-                            offspring_cells.push(extra_cell);
+                    // Introduce a random new cell adjacent to the offspring (max once per evolution).
+                    // Runs the chance function with constant MUTATION_RATE to see if it should mutate an additional cell
+                    // picking a random cell from the offspring, it generates a potential random cell around that cell, with random traits
+                    // if the spot is empty that cell is added to the offspring_cells
+
+                    if Life::chance(Self::MUTATION_RATE) {
+                        if !offspring_cells.is_empty() {
+                            // Pick a random cell from the offspring.
+                            let random_index =
+                                rand::thread_rng().gen_range(0..offspring_cells.len());
+                            let base_cell = offspring_cells[random_index];
+                            // Allow mutation offsets in all four directions.
+                            let mutation_offsets = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+                            let offset_index =
+                                rand::thread_rng().gen_range(0..mutation_offsets.len());
+                            let (mx, my) = mutation_offsets[offset_index];
+                            let new_cell = Cell {
+                                i: base_cell.i + my,
+                                j: base_cell.j + mx,
+                                cell_type: Cell::random_type().unwrap_or(base_cell.cell_type),
+                            };
+                            // Only add if that spot is empty.
+                            if !self.cells.contains(&new_cell) {
+                                offspring_cells.push(new_cell);
+                            }
                         }
                     }
 
-                    // Commit: register all offspring positions in occupied and
-                    // add their cells to the world so the next organism sees them.
-                    for &cell in &offspring_cells {
-                        occupied.insert((cell.i, cell.j));
+                    // No conflict found: create the offspring organism.
+                    let offspring = Organism::new(offspring_cells.clone());
+                    // deduct reproduction cost from the parent.
+                    organism.energy -= Self::REPRODUCTION_COST;
+                    // Add offspring cells to the world's grid.
+                    for cell in offspring_cells {
                         self.cells.push(cell);
                     }
-
-                    organism.energy -= Self::REPRODUCTION_COST;
-                    new_organisms.push(Organism::new(offspring_cells));
+                    // Save the new organism.
+                    new_organisms.push(offspring);
                     reproduced = true;
                     break;
                 }
-
+                // Optionally, if reproduction fails in all directions
                 if !reproduced {
-                    // All four directions were blocked; organism stays as-is this tick.
+                    // println!("Organism at {:?} could not reproduce due to space constraints.", organism.bounding_box());
                 }
             }
 
+            // Add all new organisms to the grid.
             self.organisms.extend(new_organisms);
         }
 
@@ -1501,7 +1508,7 @@ pub mod grid {
 
             // Iterate through organisms and convert dead ones into food
             self.organisms.retain(|organism| {
-                if organism.energy <= 0 || organism.cells.is_empty() {
+                if organism.energy <= 0 {
                     // Convert all its cells into food and add to new food list
                     for cell in &organism.cells {
                         new_food_cells.push(Cell {

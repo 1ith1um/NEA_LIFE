@@ -2,96 +2,114 @@
 pub enum Preset {
     Custom,
     #[default]
-    Xkcd,
-    Glider,
-    SmallExploder,
-    Exploder,
-    TenCellRow,
-    LightweightSpaceship,
-    Tumbler,
-    GliderGun,
-    Acorn,
+    Blinker,
+    Toad,
+    Beacon,
+    Pulsar,
+    Pentadecathlon,
+    Diehard,
+    RPentomino,
+    PiHeptomino,
+    QueenBeeShuttle,
+    SpaceRake,
 }
 
 pub static ALL: &[Preset] = &[
     Preset::Custom,
-    Preset::Xkcd,
-    Preset::Glider,
-    Preset::SmallExploder,
-    Preset::Exploder,
-    Preset::TenCellRow,
-    Preset::LightweightSpaceship,
-    Preset::Tumbler,
-    Preset::GliderGun,
-    Preset::Acorn,
+    Preset::Blinker,
+    Preset::Toad,
+    Preset::Beacon,
+    Preset::Pulsar,
+    Preset::Pentadecathlon,
+    Preset::Diehard,
+    Preset::RPentomino,
+    Preset::PiHeptomino,
+    Preset::QueenBeeShuttle,
+    Preset::SpaceRake,
 ];
 
 impl Preset {
     pub fn life(self) -> Vec<(isize, isize)> {
+        // skip formatting
         #[rustfmt::skip]
         let cells = match self {
+            // Preset cells are
             Preset::Custom => vec![],
-            Preset::Xkcd => vec![
-                "  xxx  ",
-                "  x x  ",
-                "  x x  ",
-                "   x   ",
-                "x xxx  ",
-                " x x x ",
-                "   x  x",
-                "  x x  ",
-                "  x x  ",
+            Preset::Blinker => vec![
+                "     ",
+                " xxx ",
+                "     ",
             ],
-            Preset::Glider => vec![
+            Preset::Toad => vec![
+                "      ",
+                "  xxx ",
+                " xxx  ",
+                "      ",
+            ],
+            Preset::Beacon => vec![
+                "xx  ",
+                "xx  ",
+                "  xx",
+                "  xx",
+            ],
+            Preset::Pulsar => vec![
+                "  xxx   xxx  ",
+                "             ",
+                "x    x x    x",
+                "x    x x    x",
+                "x    x x    x",
+                "  xxx   xxx  ",
+                "             ",
+                "  xxx   xxx  ",
+                "x    x x    x",
+                "x    x x    x",
+                "x    x x    x",
+                "             ",
+                "  xxx   xxx  ",
+            ],
+            Preset::Pentadecathlon => vec![
+                "    x    ",
+                "    x    ",
+                "xxxxxxxx",
+                "    x    ",
+                "    x    ",
+            ],
+            Preset::Diehard => vec![
+                "       x",
+                "xx     ",
+                " x   xxx",
+            ],
+            Preset::RPentomino => vec![
+                " xx",
+                "xx ",
                 " x ",
-                "  x",
-                "xxx"
             ],
-            Preset::SmallExploder => vec![
+            Preset::PiHeptomino => vec![
+                " xx",
+                "xx ",
                 " x ",
-                "xxx",
-                "x x",
-                " x ",
+                "   x",
             ],
-            Preset::Exploder => vec![
-                "x x x",
-                "x   x",
-                "x   x",
-                "x   x",
-                "x x x",
+            Preset::QueenBeeShuttle => vec![
+                "     x     ",
+                "    x x    ",
+                "   x   x   ",
+                "  x     x  ",
+                " x       x ",
+                "x         x",
+                " x       x ",
+                "  x     x  ",
+                "   x   x   ",
+                "    x x    ",
+                "     x     ",
             ],
-            Preset::TenCellRow => vec![
-                "xxxxxxxxxx",
-            ],
-            Preset::LightweightSpaceship => vec![
-                " xxxxx",
-                "x    x",
+            Preset::SpaceRake => vec![
                 "     x",
-                "x   x ",
-            ],
-            Preset::Tumbler => vec![
-                " xx xx ",
-                " xx xx ",
-                "  x x  ",
-                "x x x x",
-                "x x x x",
-                "xx   xx",
-            ],
-            Preset::GliderGun => vec![
-                "                        x           ",
-                "                      x x           ",
-                "            xx      xx            xx",
-                "           x   x    xx            xx",
-                "xx        x     x   xx              ",
-                "xx        x   x xx    x x           ",
-                "          x     x       x           ",
-                "           x   x                    ",
-                "            xx                      ",
-            ],
-            Preset::Acorn => vec![
-                " x     ",
-                "   x   ",
-                "xx  xxx",
+                "    x ",
+                "   x x",
+                "   x x   x",
+                "         x",
+                "        x ",
             ],
         };
 
@@ -100,13 +118,11 @@ impl Preset {
         cells
             .into_iter()
             .enumerate()
-            .flat_map(|(i, cells)| {
-                let start_column = -(cells.len() as isize / 2);
-
-                cells
-                    .chars()
+            .flat_map(|(i, row)| {
+                let start_column = -(row.len() as isize / 2);
+                row.chars()
                     .enumerate()
-                    .filter(|(_, c)| !c.is_whitespace())
+                    .filter(|&(_, c)| c == 'x')
                     .map(move |(j, _)| (start_row + i as isize, start_column + j as isize))
             })
             .collect()
@@ -120,15 +136,16 @@ impl std::fmt::Display for Preset {
             "{}",
             match self {
                 Preset::Custom => "Custom",
-                Preset::Xkcd => "xkcd #2293",
-                Preset::Glider => "Glider",
-                Preset::SmallExploder => "Small Exploder",
-                Preset::Exploder => "Exploder",
-                Preset::TenCellRow => "10 Cell Row",
-                Preset::LightweightSpaceship => "Lightweight spaceship",
-                Preset::Tumbler => "Tumbler",
-                Preset::GliderGun => "Gosper Glider Gun",
-                Preset::Acorn => "Acorn",
+                Preset::Blinker => "Blinker",
+                Preset::Toad => "Toad",
+                Preset::Beacon => "Beacon",
+                Preset::Pulsar => "Pulsar",
+                Preset::Pentadecathlon => "Pentadecathlon",
+                Preset::Diehard => "Diehard",
+                Preset::RPentomino => "R-pentomino",
+                Preset::PiHeptomino => "Pi-heptomino",
+                Preset::QueenBeeShuttle => "Queen Bee Shuttle",
+                Preset::SpaceRake => "Space Rake",
             }
         )
     }

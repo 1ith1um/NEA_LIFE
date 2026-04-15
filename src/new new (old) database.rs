@@ -97,6 +97,41 @@ impl WorldDatabase {
     ///  - `population_history` — time-series data for the population graph
     pub fn new(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
+
+        // ── Schema migration ─────────────────────────────────────────────────
+        // The original cells table used PRIMARY KEY (i, j), which meant only
+        // one cell could exist per grid position across the entire database.
+        // The current schema uses an AUTOINCREMENT id instead, allowing multiple
+        // saves to each have cells at the same coordinates.
+        //
+        // CREATE TABLE IF NOT EXISTS never alters an existing table, so if the
+        // database was created with the old schema the constraint is still there,
+        // causing a constraint violation (surfaced as ToSqlConversionFailure) the
+        // moment a second save tries to insert cells at already-used positions.
+        //
+        // Detection: the old cells table has no 'id' column. When found, all
+        // tables are dropped and recreated — saves from the old schema are not
+        // compatible with the new one anyway.
+        let old_schema: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('cells') WHERE name = 'id'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            == 0;
+
+        if old_schema {
+            conn.execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 DROP TABLE IF EXISTS cells;
+                 DROP TABLE IF EXISTS organisms;
+                 DROP TABLE IF EXISTS world_states;
+                 DROP TABLE IF EXISTS population_history;
+                 PRAGMA foreign_keys = ON;",
+            )?;
+        }
+
         conn.execute_batch(
             "PRAGMA foreign_keys = ON;
              BEGIN;
@@ -194,8 +229,8 @@ impl WorldDatabase {
                     j as i64,
                     serde_json::to_string(&cell.cell_type)
                         .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?,
-                    organism_id.map(|v| v as i64),
-                    ws_id.map(|v| v as i64),
+                    organism_id.map(|id| id as i64),
+                    ws_id.map(|id| id as i64),
                 ],
             )?;
         }
@@ -211,7 +246,7 @@ impl WorldDatabase {
         let id: usize = self.conn.query_row(
             "SELECT id FROM world_states ORDER BY timestamp DESC LIMIT 1",
             [],
-            |row| row.get::<_, i64>(0).map(|v| v as usize),
+            |row| row.get(0),
         )?;
         self.load_state_by_id(id)
     }
@@ -221,8 +256,8 @@ impl WorldDatabase {
     pub fn load_state_by_id(&self, world_state_id: usize) -> Result<WorldState> {
         let version: usize = self.conn.query_row(
             "SELECT version FROM world_states WHERE id = ?1",
-            params![world_state_id as i64],
-            |row| row.get::<_, i64>(0).map(|v| v as usize),
+            params![world_state_id],
+            |row| row.get(0),
         )?;
 
         // Load organism cells.
@@ -234,7 +269,7 @@ impl WorldDatabase {
         )?;
 
         let mut organism_cells: HashMap<usize, Vec<Cell>> = HashMap::new();
-        for row in stmt.query_map(params![world_state_id as i64], |row| {
+        for row in stmt.query_map(params![world_state_id], |row| {
             let cell_type_str: String = row.get(2)?;
             let cell_type = serde_json::from_str(&cell_type_str).map_err(|e| {
                 rusqlite::Error::FromSqlConversionFailure(
@@ -245,11 +280,11 @@ impl WorldDatabase {
             })?;
             Ok((
                 Cell {
-                    i: row.get::<_, i64>(0).map(|v| v as isize)?,
-                    j: row.get::<_, i64>(1).map(|v| v as isize)?,
+                    i: row.get(0)?,
+                    j: row.get(1)?,
                     cell_type,
                 },
-                row.get::<_, i64>(3).map(|v| v as usize)?,
+                row.get::<_, usize>(3)?,
             ))
         })? {
             let (cell, org_id) = row?;
@@ -261,13 +296,13 @@ impl WorldDatabase {
             .conn
             .prepare("SELECT id, energy, able_to_move FROM organisms WHERE world_state_id = ?1")?;
         let organisms = stmt
-            .query_map(params![world_state_id as i64], |row| {
-                let id: usize = row.get::<_, i64>(0).map(|v| v as usize)?;
+            .query_map(params![world_state_id], |row| {
+                let id: usize = row.get(0)?;
                 let cells = organism_cells.remove(&id).unwrap_or_default();
                 Ok(Organism {
                     id: Some(id),
                     cells,
-                    energy: row.get::<_, i64>(1).map(|v| v as usize)?,
+                    energy: row.get(1)?,
                     able_to_move: row.get(2)?,
                 })
             })?
@@ -279,7 +314,7 @@ impl WorldDatabase {
              WHERE world_state_id = ?1 AND organism_id IS NULL",
         )?;
         let free_cells = stmt
-            .query_map(params![world_state_id as i64], |row| {
+            .query_map(params![world_state_id], |row| {
                 let cell_type_str: String = row.get(2)?;
                 let cell_type = serde_json::from_str(&cell_type_str).map_err(|e| {
                     rusqlite::Error::FromSqlConversionFailure(
@@ -289,8 +324,8 @@ impl WorldDatabase {
                     )
                 })?;
                 Ok(Cell {
-                    i: row.get::<_, i64>(0).map(|v| v as isize)?,
-                    j: row.get::<_, i64>(1).map(|v| v as isize)?,
+                    i: row.get(0)?,
+                    j: row.get(1)?,
                     cell_type,
                 })
             })?
@@ -326,12 +361,12 @@ impl WorldDatabase {
         let saves = stmt
             .query_map([], |row| {
                 Ok(SaveInfo {
-                    id: row.get::<_, i64>(0).map(|v| v as usize)?,
-                    version: row.get::<_, i64>(1).map(|v| v as usize)?,
+                    id: row.get(0)?,
+                    version: row.get(1)?,
                     name: row.get(2)?,
                     timestamp: row.get(3)?,
-                    organism_count: row.get::<_, i64>(4).map(|v| v as usize)?,
-                    cell_count: row.get::<_, i64>(5).map(|v| v as usize)?,
+                    organism_count: row.get(4)?,
+                    cell_count: row.get(5)?,
                 })
             })?
             .collect::<Result<Vec<_>>>()?;
@@ -343,7 +378,7 @@ impl WorldDatabase {
     pub fn delete_state(&mut self, world_state_id: usize) -> Result<()> {
         self.conn.execute(
             "DELETE FROM world_states WHERE id = ?1",
-            params![world_state_id as i64],
+            params![world_state_id],
         )?;
         Ok(())
     }
@@ -370,7 +405,7 @@ impl WorldDatabase {
     pub fn record_population(&mut self, tick: usize, population: usize) -> Result<()> {
         self.conn.execute(
             "INSERT INTO population_history (tick, population) VALUES (?1, ?2)",
-            params![tick as i64, population as i64],
+            params![tick, population],
         )?;
         Ok(())
     }
@@ -384,7 +419,7 @@ impl WorldDatabase {
             .prepare("SELECT tick, population FROM population_history ORDER BY tick ASC")?;
 
         let history = stmt
-            .query_map([], |row| Ok((row.get::<_, i64>(0).map(|v| v as usize)?, row.get::<_, i64>(1).map(|v| v as usize)?)))?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<Result<Vec<_>>>()?;
 
         Ok(history)
